@@ -15,6 +15,9 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from prometheus_client import Counter, Gauge, Histogram
 
 # ── Prometheus metrics ────────────────────────────────────────
@@ -82,15 +85,31 @@ def _configure_logging() -> None:
         stream=sys.stdout,
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
+    
+    # OTel Logging bridge
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
+    logger_provider = LoggerProvider(resource=Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "inference-api")}))
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter(endpoint=endpoint, insecure=True)))
+    otel_handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+    logging.getLogger().addHandler(otel_handler)
+
+    def add_otel_trace_id(logger, method_name, event_dict):
+        span = trace.get_current_span()
+        if span.get_span_context().is_valid:
+            event_dict["trace_id"] = format(span.get_span_context().trace_id, "032x")
+            event_dict["span_id"] = format(span.get_span_context().span_id, "016x")
+        return event_dict
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            add_otel_trace_id,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
